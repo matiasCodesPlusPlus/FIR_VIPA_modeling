@@ -316,8 +316,7 @@ for i, dataset in enumerate(datasets):
     print(f"  Wavelength:  {dataset['wavelength_um']:.6f} um")
     print(f"  Data max:    {data_max:.6g}")
     print(f"  Offset:      {dataset['offset']:.6g}")
-    print(f"  R-squared:   {r_squared:.6f}")
-    print(f"  RMSE:        {rmse:.6g}")
+    
 
     fig, (ax_profile, ax_image) = plt.subplots(
         2, 1,
