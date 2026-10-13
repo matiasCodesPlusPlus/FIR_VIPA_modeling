@@ -25,6 +25,8 @@ R2_BOUNDS = (0.80, 0.9999)
 THETA_AIR_INITIAL = np.deg2rad(11.23)
 THETA_AIR_BOUNDS = (np.deg2rad(9.0), np.deg2rad(13.0))
 
+N_INITIAL = 3.389
+N_BOUNDS = (3.36, 3.42)
 
 
 # VIPA DEFAULTS -- PHYSICAL PARAMETERS FIXED
@@ -67,11 +69,11 @@ def wavelength_from_temperature(temperature_K):
 # VIPA PHYSICS MODEL -- UNCHANGED
 
 
-def vipa_power(theta_l, wavelength_m, r1, r2, theta_air):
+def vipa_power(theta_l, wavelength_m, r1, r2, theta_air,n):
     angle_tot = theta_air + theta_l
     sin_t = np.sin(angle_tot)
-    sqrt_t = np.sqrt(DEFAULTS["n"]**2 - sin_t**2)
-    theta_res = np.arcsin(sin_t / DEFAULTS["n"])
+    sqrt_t = np.sqrt(n**2 - sin_t**2)
+    theta_res = np.arcsin(sin_t /n)
 
     M = np.round(
         DEFAULTS["L"]
@@ -185,7 +187,7 @@ print(f"Loaded {len(datasets)} profiles for co-fitting.")
 n_datasets = len(datasets)
 
 
-def joint_model(xdata, r2, theta_air, *offsets):
+def joint_model(xdata, r2, theta_air, n,*offsets):
     """
     xdata is a concatenated array of theta values.
     Split it back into the individual image profiles.
@@ -204,6 +206,7 @@ def joint_model(xdata, r2, theta_air, *offsets):
             DEFAULTS["r1"],
             r2,
             theta_air,
+            n
         )
 
         # Preserve per-profile model normalization.
@@ -229,18 +232,21 @@ offset_initial = [
 p0 = [
     R2_INITIAL,
     THETA_AIR_INITIAL,
+    N_INITIAL,
     *offset_initial,
 ]
 
 lower_bounds = [
     R2_BOUNDS[0],
     THETA_AIR_BOUNDS[0],
+    N_BOUNDS[0],
     *([-np.inf] * n_datasets),
 ]
 
 upper_bounds = [
     R2_BOUNDS[1],
     THETA_AIR_BOUNDS[1],
+    N_BOUNDS[1],
     *([np.inf] * n_datasets),
 ]
 
@@ -255,7 +261,8 @@ params, covariance = curve_fit(
 
 r2_fit = params[0]
 theta_air_fit = params[1]
-offsets_fit = params[2:]
+offsets_fit = params[3:]
+n_fit = params[2]
 
 print("\n" + "=" * 60)
 print("JOINT FIT RESULTS")
@@ -282,6 +289,7 @@ for i, dataset in enumerate(datasets):
         DEFAULTS["r1"],
         r2_fit,
         theta_air_fit,
+        n_fit
     )
     power_norm = power / np.max(power)
 
@@ -302,7 +310,7 @@ for i, dataset in enumerate(datasets):
     dataset["r_squared"] = r_squared
     dataset["rmse"] = rmse
     dataset["offset"] = offset_norm * data_max
-
+    
     print(f"\n{dataset['path'].name}")
     print(f"  Temperature: {dataset['temperature_K']:.2f} K")
     print(f"  Wavelength:  {dataset['wavelength_um']:.6f} um")
@@ -337,7 +345,7 @@ for i, dataset in enumerate(datasets):
     ax_profile.set_title(
         f"{dataset['path'].name} | "
         f"T={dataset['temperature_K']:.2f} K | "
-        f"R²={r_squared:.4f} | RMSE={rmse:.4g}"
+        
     )
     ax_profile.grid(True, alpha=0.3)
     ax_profile.legend()
@@ -352,11 +360,10 @@ for i, dataset in enumerate(datasets):
     ax_image.set_ylabel("Pixel row")
     ax_image.set_title("Flipped original image")
 
-    plt.show()
+    
 
 
 # JOINT FIT SUMMARY
-
 
 print("\n" + "=" * 60)
 print("CO-FIT COMPLETE")
@@ -364,7 +371,7 @@ print("=" * 60)
 print(f"Profiles fitted: {len(datasets)}")
 print(f"Shared r2: {r2_fit:.8f}")
 print(f"Shared entrance angle: {np.rad2deg(theta_air_fit):.6f} deg")
-
+print(f"Shared refractive index n_si: {n_fit}")
 if covariance is not None and np.all(np.isfinite(covariance)):
     parameter_errors = np.sqrt(np.diag(covariance))
     print(f"Estimated r2 uncertainty: {parameter_errors[0]:.3g}")
@@ -374,3 +381,4 @@ if covariance is not None and np.all(np.isfinite(covariance)):
     )
 else:
     print("Parameter covariance unavailable or poorly conditioned.")
+plt.show()
