@@ -6,110 +6,120 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 
-
-
 # USER SETTINGS
-
-
-IMAGE_DIR = Path(r".\OUTPUT_MAPS")
+IMAGE_DIR = Path(r".\\OUTPUT_MAPS")
+IMAGE_DIR_flat = Path(r".\DUAL_PROFILES")
 
 # Set to a specific CSV filename to test only one image,
 # or leave as None to process every CSV in IMAGE_DIR.
 TEST_FILE = None
 
 # Fit bounds and initial guess for r2
-R2_INITIAL = np.sqrt(0.925)
-R2_BOUNDS = (0.80, 0.9999)
+R2_INITIAL = np.sqrt(0.9)
+R2_BOUNDS = (0.80, 0.99)
 
 # Entrance-angle bounds
 THETA_AIR_INITIAL = np.deg2rad(11.23)
 THETA_AIR_BOUNDS = (np.deg2rad(9.0), np.deg2rad(13.0))
 
-N_INITIAL = 3.389
-N_BOUNDS = (3.36, 3.42)
+Foffset_INITIAL = 0.0
+Foffset_BOUNDS = (-2.0e-3, 2.0e-3)
+
+N_INITIAL = 3.42
+N_BOUNDS = (3.4,3.43)
 
 
 # VIPA DEFAULTS -- PHYSICAL PARAMETERS FIXED
 
-
 DEFAULTS = {
     "W": 25.4e-3,             # m
     "fcyl": 0.200,            # m
-    "n": 3.389,               # Si index at 4 K
-    "h": 9.907e-3,            # m, VIPA thickness
+    "n": 3.42,               # Si index at 4 K
+    "h": 9.9095e-3,            # m, VIPA thickness
     "theta_air_deg": 11.23,
     "r1": np.sqrt(0.997),
     "L": 29.43e-3,            # m
     "fcam": 0.646,            # m
     "Spix": 0.035,            # mm per pixel
-    "lambda_qcl_um": 79.701,  # wavelength at 50 K, um
+    "lambda_qcl_um": 79.701,  # wavelength at 65 K, um
     "dLambda_dT_nm_K": 2.714, # nm/K
 }
 
-
-
 # WAVELENGTH CALIBRATION
-
 
 def wavelength_from_temperature(temperature_K):
     """
-    Reference wavelength: 79.701 um at 50 K.
+    Reference wavelength: 79.701 um at 65 K.
     dLambda/dT = 2.714 nm/K.
     Returns wavelength in meters.
     """
     wavelength_um = (
         DEFAULTS["lambda_qcl_um"]
         + DEFAULTS["dLambda_dT_nm_K"]
-        * (temperature_K - 50.0) / 1000.0
+        * (temperature_K - 65.0) / 1000.0
     )
     return wavelength_um * 1e-6
 
-
+def matlab_round(x, decimals=0):
+    # Scale to the target decimal place
+    factor = 10 ** decimals
+    scaled = x * factor
+    
+    # Extract signs and apply the "away from zero" offset
+    rounded = np.trunc(scaled + np.copysign(0.5, scaled))
+    
+    # Scale back down
+    return rounded / factor
 
 # VIPA PHYSICS MODEL -- UNCHANGED
 
+def vipa_power(theta_l, wavelength_m, r1, r2, theta_air, foffset, n):
 
-def vipa_power(theta_l, wavelength_m, r1, r2, theta_air,n):
+    def VIPA_powerEnvelope(theta_l, foffset):
+        return np.exp(((-2*(DEFAULTS["fcyl"]-foffset)**2 *np.tan(theta_l)**2)/(DEFAULTS["fcam"] - foffset)**2)/ ((DEFAULTS["fcam"]-foffset)**2 * DEFAULTS["W"]**2))
+    
     angle_tot = theta_air + theta_l
+    thickness = DEFAULTS["h"] / np.cos(theta_air)
     sin_t = np.sin(angle_tot)
     sqrt_t = np.sqrt(n**2 - sin_t**2)
-    theta_res = np.arcsin(sin_t /n)
+    theta_res = np.arcsin(np.sin(theta_air)/ n)
 
-    M = np.round(
+    M = matlab_round(
         DEFAULTS["L"]
-        / (2.0 * DEFAULTS["h"] * np.tan(theta_res))
+        / (2.0 * thickness * np.tan(theta_res))
     )
 
     k = 2.0 * np.pi / wavelength_m
-    delta = 2.0 * DEFAULTS["h"] * k * sqrt_t
+    delta = 2.0 * thickness * k * sqrt_t
     R = r1 * r2
 
     F1 = 4.0 * R / (1.0 - R)**2
     FM = 4.0 * R**M / (1.0 - R**M)**2
 
-    return (
-        1.0 + FM * np.sin(M * delta / 2.0)**2
-    ) / (
-        1.0 + F1 * np.sin(delta / 2.0)**2
-    )
+    return VIPA_powerEnvelope(theta_l, foffset)*(
+            1.0 + FM * np.sin(M * delta / 2.0)**2
+        ) / (
+            1.0 + F1 * np.sin(delta / 2.0)**2
+        )
 
 
+def vipa_power_LM(x, wavelength_m, r1, r2, theta_i, foffset):
+    envelope_portion = np.exp(-(2*DEFAULTS["fcyl"]**2 * x**2)/ ((DEFAULTS["fcam"])**2 * (1e-3)**2))
+    k = 2*np.pi / wavelength_m
+    thickness_eff = DEFAULTS["h"]/np.cos(theta_i)
+    phase_portion = 2*thickness_eff*np.cos(theta_i) - (2*thickness_eff*x)/(DEFAULTS["fcam"] - foffset) - (thickness_eff*np.cos(theta_i)*x**2)/(DEFAULTS["fcam"] - foffset)**2
+    lorentzian_portion = 1/((1-r1*r2)**2 + 4*(r1*r2)*(np.sin(k*phase_portion/2)))
+    return envelope_portion*lorentzian_portion
 
-# PIXEL-TO-ANGLE CONVERSION -- UNCHANGED
 
+# PIXEL-TO-ANGLE CONVERSION 
+
+X_OFFSET_MM = 2.0#0.0
 
 def pixel_angles(n_pixels):
-    """
-    Pixel 0 center is x = -1.72 mm.
-    Pixel spacing is 0.035 mm.
-    Zero-angle reference is x = 50 mm.
-    """
-    x_mm = -1.72 + np.arange(n_pixels) * DEFAULTS["Spix"]
-    x_rel_m = (x_mm - 50.0) * 1e-3
-
+    x_mm = -.04 + np.arange(n_pixels) * DEFAULTS["Spix"]
+    x_rel_m = (x_mm - 50.0 - X_OFFSET_MM) * 1e-3
     return np.arctan(x_rel_m / DEFAULTS["fcam"]), x_mm
-
-
 
 # LOAD AND PREPARE PROFILES
 
@@ -121,22 +131,27 @@ else:
         p for p in IMAGE_DIR.iterdir()
         if p.is_file() and p.suffix.lower() == ".csv"
     )
+    prof_paths = sorted(
+            p for p in IMAGE_DIR_flat.iterdir()
+            if p.is_file() and p.suffix.lower() == ".csv"
+        )
 
 if not image_paths:
     raise FileNotFoundError(f"No CSV images found in {IMAGE_DIR}")
 
 datasets = []
 
-for image_path in image_paths:
+for image_path, prof_path in zip(image_paths,prof_paths):
     
     temperature_K = float(image_path.stem.split("_")[-1])
     wavelength_m = wavelength_from_temperature(temperature_K)
 
     
-    image = np.fliplr(np.loadtxt(image_path, delimiter=","))[60:180,:]
+    image =np.fliplr(np.loadtxt(image_path, delimiter=","))[60:180,:]
 
     
-    profile = np.sum(image, axis=0).astype(float)
+    #profile = np.sum(image, axis=0).astype(float)
+    profile = np.loadtxt(prof_path)
 
     theta_l, x_mm = pixel_angles(profile.size)
 
@@ -164,6 +179,8 @@ for image_path in image_paths:
         "y_fit": y_fit,
         "y_norm": y_norm,
         "data_max": data_max,
+        "theta_l" : theta_l,
+
     })
 
 if not datasets:
@@ -187,7 +204,7 @@ print(f"Loaded {len(datasets)} profiles for co-fitting.")
 n_datasets = len(datasets)
 
 
-def joint_model(xdata, r2, theta_air, n,*offsets):
+def joint_model(xdata, r2, theta_air,foffset, n, *offsets, ):
     """
     xdata is a concatenated array of theta values.
     Split it back into the individual image profiles.
@@ -206,7 +223,40 @@ def joint_model(xdata, r2, theta_air, n,*offsets):
             DEFAULTS["r1"],
             r2,
             theta_air,
-            n
+            foffset,
+            n,
+        )
+
+        # Preserve per-profile model normalization.
+        pmax = np.max(power)
+        if not np.isfinite(pmax) or pmax <= 0:
+            raise ValueError("Invalid VIPA power normalization.")
+
+        power_norm = power / pmax
+        predictions.append(power_norm + offsets[i])
+
+    return np.concatenate(predictions)
+
+def joint_model_LM(xdata, r2, theta_air,foffset, *offsets, ):
+    """
+    xdata is a concatenated array of theta values.
+    Split it back into the individual image profiles.
+    """
+    predictions = []
+    start = 0
+
+    for i, dataset in enumerate(datasets):
+        n_points = len(dataset["theta_l"])
+        theta = xdata[start:start + n_points]
+        start += n_points
+
+        power = vipa_power_LM(
+            xdata,
+            dataset["wavelength_m"],
+            DEFAULTS["r1"],
+            r2,
+            theta_air,
+            foffset,
         )
 
         # Preserve per-profile model normalization.
@@ -228,52 +278,117 @@ y_all = np.concatenate([d["y_norm"] for d in datasets])
 offset_initial = [
     0.0 for _ in datasets
 ]
+mode = "n - dep"
+if mode == "n - dep":
 
-p0 = [
-    R2_INITIAL,
-    THETA_AIR_INITIAL,
-    N_INITIAL,
-    *offset_initial,
-]
+    p0 = [
+        R2_INITIAL,
+        THETA_AIR_INITIAL,
+        Foffset_INITIAL,
+        N_INITIAL,
+        *offset_initial,
+        
+    ]
 
-lower_bounds = [
-    R2_BOUNDS[0],
-    THETA_AIR_BOUNDS[0],
-    N_BOUNDS[0],
-    *([-np.inf] * n_datasets),
-]
+    lower_bounds = [
+        R2_BOUNDS[0],
+        THETA_AIR_BOUNDS[0],
+        Foffset_BOUNDS[0],
+        N_BOUNDS[0],
+        *([-np.inf] * n_datasets),
+        
+    ]
 
-upper_bounds = [
-    R2_BOUNDS[1],
-    THETA_AIR_BOUNDS[1],
-    N_BOUNDS[1],
-    *([np.inf] * n_datasets),
-]
+    upper_bounds = [
+        R2_BOUNDS[1],
+        THETA_AIR_BOUNDS[1],
+        Foffset_BOUNDS[1],
+        N_BOUNDS[1],
+        *([np.inf] * n_datasets),
+        
+    ]
 
-params, covariance = curve_fit(
-    joint_model,
-    theta_all,
-    y_all,
-    p0=p0,
-    bounds=(lower_bounds, upper_bounds),
-    maxfev=100000,
-)
+    params, covariance = curve_fit(
+        joint_model,
+        theta_all,
+        y_all,
+        p0=p0,
+        bounds=(lower_bounds, upper_bounds),
+        maxfev=100000,
+    )
 
-r2_fit = params[0]
-theta_air_fit = params[1]
-offsets_fit = params[3:]
-n_fit = params[2]
+    r2_fit = params[0]
+    theta_air_fit = params[1]
+    foffset_fit = params[2]
+    offsets_fit = params[4:]
+    n_fit = params[3]
 
-print("\n" + "=" * 60)
-print("JOINT FIT RESULTS")
-print("=" * 60)
-print(f"Shared fitted r2: {r2_fit:.8f}")
-print(
-    "Shared entrance angle: "
-    f"{np.rad2deg(theta_air_fit):.6f} deg"
-)
+    print("\n" + "=" * 60)
+    print("JOINT FIT RESULTS")
+    print("=" * 60)
+    print(f"Shared fitted r2: {r2_fit:.8f}")
+    print(
+        "Shared entrance angle: "
+        f"{np.rad2deg(theta_air_fit):.6f} deg"
+    )
+    print(f"Shared focus (out) offset : {foffset_fit} m")
+    print(f"shared refractive index of silicon substrate: {n_fit}")
 
 
+
+if mode == "LM":
+    p0 = [
+            R2_INITIAL,
+            THETA_AIR_INITIAL,
+            Foffset_INITIAL,
+            N_INITIAL,
+            *offset_initial,
+            
+        ]
+    
+    lower_bounds = [
+        R2_BOUNDS[0],
+        THETA_AIR_BOUNDS[0],
+        Foffset_BOUNDS[0],
+        N_BOUNDS[0],
+        *([-np.inf] * n_datasets),
+        
+    ]
+
+    upper_bounds = [
+        R2_BOUNDS[1],
+        THETA_AIR_BOUNDS[1],
+        Foffset_BOUNDS[1],
+        N_BOUNDS[1],
+        *([np.inf] * n_datasets),
+        
+    ]
+
+    params, covariance = curve_fit(
+        joint_model,
+        theta_all,
+        y_all,
+        p0=p0,
+        bounds=(lower_bounds, upper_bounds),
+        maxfev=100000,
+    )
+
+    r2_fit = params[0]
+    theta_air_fit = params[1]
+    foffset_fit = params[2]
+    offsets_fit = params[3:]
+    
+
+    print("\n" + "=" * 60)
+    print("JOINT FIT RESULTS")
+    print("=" * 60)
+    print(f"Shared fitted r2: {r2_fit:.8f}")
+    print(
+        "Shared entrance angle: "
+        f"{np.rad2deg(theta_air_fit):.6f} deg"
+    )
+    print(f"Shared focus (out) offset : {foffset_fit} m")
+    
 
 # EVALUATE AND PLOT EACH PROFILE
 
@@ -282,15 +397,26 @@ for i, dataset in enumerate(datasets):
     data_max = dataset["data_max"]
     y_fit = dataset["y_fit"]
     offset_norm = offsets_fit[i]
-
-    power = vipa_power(
-        theta_fit,
-        dataset["wavelength_m"],
-        DEFAULTS["r1"],
-        r2_fit,
-        theta_air_fit,
-        n_fit
-    )
+    if mode == "n - dep":
+        power = vipa_power(
+            theta_fit,
+            dataset["wavelength_m"],
+            DEFAULTS["r1"],
+            r2_fit,
+            theta_air_fit,
+            foffset_fit,
+            n_fit,
+        )
+    elif mode == "LM":
+        power = vipa_power_LM(
+                    theta_fit,
+                    dataset["wavelength_m"],
+                    DEFAULTS["r1"],
+                    r2_fit,
+                    theta_air_fit,
+                    foffset_fit,
+        
+                )
     power_norm = power / np.max(power)
 
     fitted_norm = power_norm + offset_norm
@@ -370,7 +496,10 @@ print("=" * 60)
 print(f"Profiles fitted: {len(datasets)}")
 print(f"Shared r2: {r2_fit:.8f}")
 print(f"Shared entrance angle: {np.rad2deg(theta_air_fit):.6f} deg")
-print(f"Shared refractive index n_si: {n_fit}")
+if mode != "LM":
+    print(f"Shared refractive index: {n_fit}")
+print(f"Shared focus offset: {foffset_fit} m")
+
 if covariance is not None and np.all(np.isfinite(covariance)):
     parameter_errors = np.sqrt(np.diag(covariance))
     print(f"Estimated r2 uncertainty: {parameter_errors[0]:.3g}")
@@ -381,3 +510,14 @@ if covariance is not None and np.all(np.isfinite(covariance)):
 else:
     print("Parameter covariance unavailable or poorly conditioned.")
 plt.show()
+
+def wavelength_old_reference(temperature_K):
+    return (
+        DEFAULTS["lambda_qcl_um"]
+        + DEFAULTS["dLambda_dT_nm_K"]
+        * (temperature_K - 50.0) / 1000.0
+    ) * 1e-6
+
+def VIPA_powerEnvelope(theta_l, foffset):
+    return np.exp((-2*(DEFAULTS["fcyl"]-foffset)**2 *np.tan(theta_l)**2)/(DEFAULTS["fcam"])/ ((DEFAULTS["fcam"]-foffset)**2 * DEFAULTS["W"]**2))
+
