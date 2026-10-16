@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
 
 # USER SETTINGS
 IMAGE_DIR = Path(r".\\OUTPUT_MAPS")
@@ -16,17 +17,21 @@ TEST_FILE = None
 
 # Fit bounds and initial guess for r2
 R2_INITIAL = np.sqrt(0.9)
-R2_BOUNDS = (0.80, 0.99)
+R2_BOUNDS = (0.80, 0.98)
 
 # Entrance-angle bounds
 THETA_AIR_INITIAL = np.deg2rad(11.23)
-THETA_AIR_BOUNDS = (np.deg2rad(9.0), np.deg2rad(13.0))
+THETA_AIR_BOUNDS = (np.deg2rad(10.0), np.deg2rad(13.0))
 
-Foffset_INITIAL = 0.0
+
+THETA_L_OFF_INIT = np.deg2rad(1.23)
+THETA_L_OFF_BOUNDS = (np.deg2rad(-5.0), np.deg2rad(5.0))
+
+Foffset_INITIAL = 1.0e-3
 Foffset_BOUNDS = (-2.0e-3, 2.0e-3)
 
 N_INITIAL = 3.42
-N_BOUNDS = (3.4,3.43)
+N_BOUNDS = (3.41,3.43)
 
 
 # VIPA DEFAULTS -- PHYSICAL PARAMETERS FIXED
@@ -44,6 +49,38 @@ DEFAULTS = {
     "lambda_qcl_um": 79.701,  # wavelength at 65 K, um
     "dLambda_dT_nm_K": 2.714, # nm/K
 }
+#2d FITS
+
+def load_testData(testPath, first_order_peaks, second_order_peaks):
+
+    def temp_dist_conversion(peak_array):
+        print(np.array(peak_array))
+        peak_vals = []
+        for index, val in enumerate(peak_array):
+            if val != 0:
+                peak_vals.append([(144+index*288), val])
+
+        print(peak_vals)
+        return np.array(peak_vals)
+
+    first_order_peaks = temp_dist_conversion(first_order_peaks)
+    second_order_peaks = temp_dist_conversion(second_order_peaks)
+
+
+    with os.scandir(testPath) as maps:
+        images = []
+        for map in maps:
+            image = np.fliplr(np.loadtxt(f"{testPath}\\{map.name}", delimiter=","))
+            images.append(image)
+
+        #stack maps
+        stack_base = images[0]
+        stacked_map = stack_base
+        for i in range(1,len(images)):
+            stacked_map = np.vstack((stacked_map,images[i]))
+
+    return stacked_map, first_order_peaks, second_order_peaks
+
 
 # WAVELENGTH CALIBRATION
 
@@ -73,8 +110,9 @@ def matlab_round(x, decimals=0):
 
 # VIPA PHYSICS MODEL -- UNCHANGED
 
-def vipa_power(theta_l, wavelength_m, r1, r2, theta_air, foffset, n):
-
+def vipa_power(theta_l, wavelength_m, r1, r2, theta_air, foffset, n, theta_l_offset_rad):
+    theta_l_offset_rad = 0
+    theta_l = theta_l - theta_l_offset_rad
     def VIPA_powerEnvelope(theta_l, foffset):
         return np.exp(((-2*(DEFAULTS["fcyl"]-foffset)**2 *np.tan(theta_l)**2)/(DEFAULTS["fcam"] - foffset)**2)/ ((DEFAULTS["fcam"]-foffset)**2 * DEFAULTS["W"]**2))
     
@@ -151,7 +189,7 @@ for image_path, prof_path in zip(image_paths,prof_paths):
 
     
     #profile = np.sum(image, axis=0).astype(float)
-    profile = np.loadtxt(prof_path)
+    profile = np.sum(image,axis = 0)
 
     theta_l, x_mm = pixel_angles(profile.size)
 
@@ -204,7 +242,7 @@ print(f"Loaded {len(datasets)} profiles for co-fitting.")
 n_datasets = len(datasets)
 
 
-def joint_model(xdata, r2, theta_air,foffset, n, *offsets, ):
+def joint_model(xdata, r2, theta_air,foffset, n, theta_l_offset,  *offsets, ):
     """
     xdata is a concatenated array of theta values.
     Split it back into the individual image profiles.
@@ -225,6 +263,7 @@ def joint_model(xdata, r2, theta_air,foffset, n, *offsets, ):
             theta_air,
             foffset,
             n,
+            theta_l_offset,
         )
 
         # Preserve per-profile model normalization.
@@ -286,6 +325,7 @@ if mode == "n - dep":
         THETA_AIR_INITIAL,
         Foffset_INITIAL,
         N_INITIAL,
+        THETA_L_OFF_INIT,
         *offset_initial,
         
     ]
@@ -295,6 +335,7 @@ if mode == "n - dep":
         THETA_AIR_BOUNDS[0],
         Foffset_BOUNDS[0],
         N_BOUNDS[0],
+        THETA_L_OFF_BOUNDS[0],
         *([-np.inf] * n_datasets),
         
     ]
@@ -304,6 +345,7 @@ if mode == "n - dep":
         THETA_AIR_BOUNDS[1],
         Foffset_BOUNDS[1],
         N_BOUNDS[1],
+        THETA_L_OFF_BOUNDS[1],
         *([np.inf] * n_datasets),
         
     ]
@@ -320,8 +362,9 @@ if mode == "n - dep":
     r2_fit = params[0]
     theta_air_fit = params[1]
     foffset_fit = params[2]
-    offsets_fit = params[4:]
+    offsets_fit = params[5:]
     n_fit = params[3]
+    theta_offset_l_fit = params[4]
 
     print("\n" + "=" * 60)
     print("JOINT FIT RESULTS")
@@ -391,7 +434,12 @@ if mode == "LM":
     
 
 # EVALUATE AND PLOT EACH PROFILE
-
+temps = []
+fitted_profs = []
+xdatas = []
+first_order_peaks = []
+second_order_peaks = []
+wavelengths = []
 for i, dataset in enumerate(datasets):
     theta_fit = dataset["theta_l"]
     data_max = dataset["data_max"]
@@ -406,6 +454,7 @@ for i, dataset in enumerate(datasets):
             theta_air_fit,
             foffset_fit,
             n_fit,
+            theta_offset_l_fit
         )
     elif mode == "LM":
         power = vipa_power_LM(
@@ -457,6 +506,21 @@ for i, dataset in enumerate(datasets):
         label="Measured vertical sum",
         linewidth=1.2,
     )
+
+    peaks, props = find_peaks(dataset["fit"],10)
+    print(f"peaks: {peaks}")
+
+
+
+    if len(peaks) == 1:
+        first_order_peaks.append(peaks[0])
+        second_order_peaks.append(0)
+    else:
+        first_order_peaks.append(peaks[0])
+        second_order_peaks.append(peaks[1])
+
+
+
     ax_profile.plot(
         dataset["x_mm"],
         fitted_profile,
@@ -484,10 +548,70 @@ for i, dataset in enumerate(datasets):
     ax_image.set_xlabel("Pixel column")
     ax_image.set_ylabel("Pixel row")
     ax_image.set_title("Flipped original image")
-
+    temps.append(dataset["temperature_K"])
+    fitted_profs.append(fitted_profile)
+    xdatas.append(dataset["x_mm"])
+    wavelengths.append(dataset["wavelength_um"])
+##MASTER PLOT
+fig, ax = plt.subplots()
+master_envelope = np.exp(((-2*(DEFAULTS["fcyl"]-foffset_fit)**2 *np.tan(theta_l)**2)/(DEFAULTS["fcam"] - foffset_fit)**2)/ ((DEFAULTS["fcam"]-foffset_fit)**2 * DEFAULTS["W"]**2))
+scale = np.max(np.array(fitted_profs))/np.max(master_envelope)
+ax.plot(dataset["x_mm"], scale*master_envelope)
+for temp,xdata,data in zip(temps, xdatas,fitted_profs):
+    ax.plot(xdata, data, label = f"QCL Temp: {temp} K")
     
+ax.legend()
+
+fig,ax = plt.subplots()
+fullim, fop, sop = load_testData(".\\OUTPUT_MAPS", first_order_peaks, second_order_peaks)
+
+ax.imshow(fullim, cmap = "jet", vmin = 0, vmax = np.max(fullim), origin="lower",
+    aspect="auto",
+    extent= [x_mm[0], x_mm[-1],0,288*35*fullim.shape[0]/1000],
+    interpolation="nearest")
 
 
+
+
+# Primary axis: VIPA model fits in physical coordinates
+axis_o1 =  -.04+fop[:, 1]*DEFAULTS["Spix"]
+axis_o2 =  -.04+sop[:, 1]*DEFAULTS["Spix"]
+ax.plot(axis_o1, fop[:, 0]*35*fullim.shape[0]/1000 /11, color="red", linestyle="--", label="O1 FIT")
+ax.plot(axis_o2, sop[:, 0]*35*fullim.shape[0]/1000 / 11, color="orange", linestyle="--", label="O2 FIT")
+
+ax.set_xlabel("Focal plane (mm)")
+ax.set_ylabel("Wavelength (um)")
+ax.set_title("VIPA FIT")
+
+# Secondary axis: independent image-row coordinates
+n_maps = len(wavelengths)
+rows_per_map = image.shape[0] / n_maps
+
+y_centers = (np.arange(n_maps) + 0.5) * rows_per_map
+
+ax_wave = ax.twinx()
+
+# Independent limits: image rows, not the primary wavelength limits
+ax_wave.set_ylim(0, image.shape[0])
+ax_wave.invert_yaxis()  # Remove this line if row 0 is at the bottom
+
+ax_wave.set_yticks(y_centers)
+ax_wave.set_yticklabels([f"{w:.4f}" for w in wavelengths])
+ax_wave.set_ylabel("Wavelength (um)")
+
+ax.legend(loc="upper right")
+ax.set_title("VIPA FIT")
+
+# Hide the primary (left) y-axis
+ax.tick_params(axis="y", left=False, labelleft=False)
+ax.spines["left"].set_visible(False)
+
+# Keep the independent right-hand wavelength axis visible
+ax_wave.tick_params(axis="y", right=True, labelright=True)
+ax_wave.spines["right"].set_visible(True)
+
+
+ax.legend()
 # JOINT FIT SUMMARY
 
 print("\n" + "=" * 60)
